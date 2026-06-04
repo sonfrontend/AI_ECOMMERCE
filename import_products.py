@@ -9,72 +9,97 @@ db = 'DB_ECOMMERCE'
 conn_str = f'DRIVER={{ODBC Driver 17 for SQL Server}};SERVER={server};DATABASE={db};UID=sa;PWD=123456'
 
 try:
-    print("⏳ Đang kết nối tới SQL Server...")
+    print("Dang ket noi toi SQL Server...")
     conn = pyodbc.connect(conn_str)
     cursor = conn.cursor()
-    print("✅ Kết nối Database thành công!")
+    print("Ket noi Database thanh cong!")
 
-    # --- 2. Đọc file Excel ---
-    # Đảm bảo tên file này khớp với tên file Excel đang nằm trong máy bạn
-    file_name = 'products.xlsx' 
-    df_prod = pd.read_excel(file_name, engine='openpyxl')
-    
-    # Xử lý các giá trị NaN của Pandas thành None của Python để SQL hiểu là NULL
+    # --- 2. Lấy danh sách CategoryId hợp lệ ---
+    cursor.execute("SELECT Id FROM Categories")
+    valid_categories = {row[0] for row in cursor.fetchall()}
+
+    # --- 3. Xóa dữ liệu cũ ---
+    print("Dang xoa du lieu cu trong bang ProductVariants va Products...")
+    cursor.execute("DELETE FROM ProductVariants")
+    cursor.execute("DELETE FROM Products")
+    conn.commit()
+
+    # --- 4. Đọc và Import bảng Products ---
+    print("Dang doc file Products.xlsx...")
+    df_prod = pd.read_excel('Products.xlsx', engine='openpyxl')
     df_prod = df_prod.replace({np.nan: None})
 
-    print(f"⏳ Đang xử lý mã SKU và đổ {len(df_prod)} dòng vào bảng Products...")
-
-    # --- 3. Câu lệnh Insert (Chính xác 13 cột và 13 dấu ?) ---
-    insert_query = """
+    print(f"Dang do {len(df_prod)} dong vao bang Products...")
+    insert_prod_query = """
         INSERT INTO Products (
-            ArticleId, ProductCode, ProductName, CategoryId, Color, 
-            Size, Price, StockQuantity, ImageUrl, Description,
-            IsActived, CreatedAt, UpdatedAt
-        ) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ProductId, ProductName, CategoryId, Description, DiscountPercentage,
+            DiscountStartDate, DiscountEndDate, ImageUrl, SoldQuantity, IsActived, CreatedAt, UpdatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """
     
-    # --- 4. Chèn dữ liệu từng dòng ---
     for index, row in df_prod.iterrows():
-        # Lấy mã gốc 10 số và 7 số
-        base_article_id = str(row['ArticleId']).split('.')[0].zfill(10)
-        product_code = str(row['ProductCode']).split('.')[0].zfill(7)
-        
-        # Xử lý dọn dẹp chuỗi Size
-        size = str(row['Size']).strip() if pd.notna(row['Size']) else ""
-        
-        # TẠO MÃ DUY NHẤT (SKU): Ghép Size vào mã ArticleId để tránh trùng Khóa chính
-        if size and size.lower() != 'nan' and size.lower() != 'none':
-            unique_article_id = f"{base_article_id}-{size}"
-        else:
-            unique_article_id = base_article_id
-            
-        # Truyền chính xác 13 tham số vào Database
-        cursor.execute(insert_query, 
-            unique_article_id,                                # 1. Đã dùng mã SKU duy nhất
-            product_code,                                     # 2. ProductCode
-            str(row['ProductName']),                          # 3. ProductName
-            int(row['CategoryId']),                           # 4. CategoryId
-            str(row['Color']) if pd.notna(row['Color']) else None, # 5. Color
-            size if size and size.lower() != 'nan' else None, # 6. Size
-            float(row['Price']),                              # 7. Price
-            int(row['StockQuantity']),                        # 8. StockQuantity
-            str(row['ImageUrl']) if pd.notna(row['ImageUrl']) else None, # 9. ImageUrl
-            str(row['Description']) if pd.notna(row['Description']) else None, # 10. Description
-            1,                                                # 11. IsActived = True
-            datetime.now(),                                   # 12. CreatedAt
-            datetime.now()                                    # 13. UpdatedAt
-        )
+        cat_id = None
+        if row['CategoryId'] is not None and not pd.isna(row['CategoryId']):
+            try:
+                parsed_cat = int(row['CategoryId'])
+                if parsed_cat in valid_categories:
+                    cat_id = parsed_cat
+            except ValueError:
+                pass
 
-    # Lưu thay đổi (Commit)
+        cursor.execute(insert_prod_query,
+            str(row['ProductId']) if row['ProductId'] else None,
+            str(row['ProductName']) if row['ProductName'] else None,
+            cat_id,
+            str(row['Description']) if row['Description'] else None,
+            int(row['DiscountPercentage']) if row['DiscountPercentage'] is not None else 0,
+            row['DiscountStartDate'] if pd.notna(row['DiscountStartDate']) else None,
+            row['DiscountEndDate'] if pd.notna(row['DiscountEndDate']) else None,
+            str(row['ImageUrl']) if row['ImageUrl'] else None,
+            int(row['SoldQuantity']) if row['SoldQuantity'] is not None else 0,
+            1 if row.get('IsActive', 1) in [1, True, 'True', 'true'] else 0,
+            row['CreatedAt'] if pd.notna(row['CreatedAt']) else datetime.now(),
+            row['UpdatedAt'] if pd.notna(row['UpdatedAt']) else datetime.now()
+        )
     conn.commit()
-    print("🎉 HOÀN TẤT XUẤT SẮC! Đã import toàn bộ Sản phẩm thành công.")
+    print("Da import xong bang Products!")
+
+    # --- 4. Đọc và Import bảng ProductVariants ---
+    print("Dang doc file ProductVariants.xlsx...")
+    df_var = pd.read_excel('ProductVariants.xlsx', engine='openpyxl')
+    df_var = df_var.replace({np.nan: None})
+
+    print(f"Dang do {len(df_var)} dong vao bang ProductVariants...")
+    insert_var_query = """
+        INSERT INTO ProductVariants (
+            ProductId, SKU, Color, Size, StockQuantity,
+            SoldQuantity, OriginalPrice, CurrentPrice, ImageUrl, IsActived, CreatedAt, UpdatedAt
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
+
+    for index, row in df_var.iterrows():
+        cursor.execute(insert_var_query,
+            str(row['ProductId']) if row['ProductId'] else None,
+            str(row['SKU']) if row['SKU'] else None,
+            str(row['Color']) if row['Color'] else None,
+            str(row['Size']) if row['Size'] else None,
+            int(row['StockQuantity']) if row['StockQuantity'] is not None else 0,
+            int(row['SoldQuantity']) if row['SoldQuantity'] is not None else 0,
+            float(row['OriginalPrice']) if row['OriginalPrice'] is not None else 0.0,
+            float(row['CurrentPrice']) if row['CurrentPrice'] is not None else 0.0,
+            str(row['ImageUrl']) if row['ImageUrl'] else None,
+            1 if row.get('IsActive', 1) in [1, True, 'True', 'true'] else 0,
+            row['CreatedAt'] if pd.notna(row['CreatedAt']) else datetime.now(),
+            row['UpdatedAt'] if pd.notna(row['UpdatedAt']) else datetime.now()
+        )
+    conn.commit()
+    print("HOAN TAT! Da import toan bo du lieu thanh cong.")
 
 except pyodbc.IntegrityError as e:
-    print(f"❌ LỖI RÀNG BUỘC (Khóa chính / Khóa ngoại):")
-    print(f"Chi tiết: {e}")
+    print(f"LOI RANG BUOC (Khoa chinh / Khoa ngoai):")
+    print(f"Chi tiet: {e}")
 except Exception as e:
-    print(f"❌ CÓ LỖI XẢY RA: {e}")
+    print(f"CO LOI XAY RA: {e}")
 finally:
     if 'conn' in locals():
         conn.close()

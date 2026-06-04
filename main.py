@@ -129,6 +129,47 @@ async def recommend_by_history(req: RecommendRequest):
         print(f"Error during recommendation: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+from recommendation_engine import RecommendationEngine
+
+# Database connection string from appsettings.json
+DB_CONNECTION_STRING = "Driver={ODBC Driver 17 for SQL Server};Server=DESKTOP-6MNENLA;Database=DB_ECOMMERCE;UID=sa;PWD=123456;TrustServerCertificate=yes;"
+recommender = RecommendationEngine(DB_CONNECTION_STRING)
+
+@app.on_event("startup")
+async def startup_recommender():
+    print("Training Collaborative Filtering model...")
+    # Train the model asynchronously or in a thread so it doesn't block startup completely
+    import threading
+    t = threading.Thread(target=recommender.train_model)
+    t.start()
+
+class CFRecommendRequest(BaseModel):
+    user_id: str
+    top_k: int = 10
+
+@app.post("/api/recommend-cf", response_model=List[str])
+async def recommend_cf(req: CFRecommendRequest):
+    try:
+        # recommend_for_user expects the string GUID
+        recommended_ids = recommender.recommend_for_user(req.user_id, top_k=req.top_k)
+        return recommended_ids
+    except Exception as e:
+        print(f"Error during CF recommendation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class FBTRecommendRequest(BaseModel):
+    product_id: str
+    top_k: int = 5
+
+@app.post("/api/recommend-fbt", response_model=List[str])
+async def recommend_fbt_api(req: FBTRecommendRequest):
+    try:
+        recommended_ids = recommender.recommend_fbt(req.product_id, top_k=req.top_k)
+        return recommended_ids
+    except Exception as e:
+        print(f"Error during FBT recommendation: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

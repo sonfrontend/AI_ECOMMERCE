@@ -23,8 +23,16 @@ def main():
         cursor = conn.cursor()
         print("Ket noi Database thanh cong!")
 
-        # Lấy danh sách sản phẩm
-        cursor.execute("SELECT ArticleId, ImageUrl FROM Products WHERE ImageUrl IS NOT NULL")
+        # Lấy danh sách sản phẩm (Lấy ảnh chính, nếu không có thì lấy ảnh của ProductVariant đầu tiên)
+        cursor.execute("""
+            SELECT ProductId AS ArticleId, ImageUrl 
+            FROM (
+                SELECT p.ProductId, 
+                       COALESCE(p.ImageUrl, (SELECT TOP 1 pv.ImageUrl FROM ProductVariants pv WHERE pv.ProductId = p.ProductId AND pv.ImageUrl IS NOT NULL)) AS ImageUrl 
+                FROM Products p
+            ) t
+            WHERE ImageUrl IS NOT NULL
+        """)
         rows = cursor.fetchall()
         
         print(f"Tim thay {len(rows)} san pham co hinh anh. Bat dau trich xuat dac trung...")
@@ -32,7 +40,7 @@ def main():
         count = 0
         for row in rows:
             article_id = row.ArticleId
-            image_name = row.ImageUrl
+            image_name = os.path.basename(row.ImageUrl.replace('\\', '/'))
             
             img_path = os.path.join(IMAGE_DIR, image_name)
             
