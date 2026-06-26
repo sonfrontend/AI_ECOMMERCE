@@ -135,13 +135,31 @@ from recommendation_engine import RecommendationEngine
 DB_CONNECTION_STRING = "Driver={ODBC Driver 17 for SQL Server};Server=DESKTOP-6MNENLA;Database=DB_ECOMMERCE;UID=sa;PWD=123456;TrustServerCertificate=yes;"
 recommender = RecommendationEngine(DB_CONNECTION_STRING)
 
+import asyncio
+
+async def scheduled_training():
+    while True:
+        # Chờ 1 giờ (3600 giây) trước khi bắt đầu học lại, không tính lần học đầu tiên
+        await asyncio.sleep(3600)
+        print("Starting scheduled model training (retrain)...")
+        try:
+            import threading
+            t = threading.Thread(target=recommender.train_model)
+            t.start()
+            # Wait for thread to complete roughly, or just let it run.
+            # We don't necessarily need to join it here since it's a daemon-like operation.
+        except Exception as e:
+            print(f"Error in scheduled training: {e}")
+
 @app.on_event("startup")
 async def startup_recommender():
-    print("Training Collaborative Filtering model...")
-    # Train the model asynchronously or in a thread so it doesn't block startup completely
+    print("Training Collaborative Filtering model (Initial)...")
     import threading
     t = threading.Thread(target=recommender.train_model)
     t.start()
+    
+    # Kích hoạt bộ hẹn giờ tự động học lại
+    asyncio.create_task(scheduled_training())
 
 class CFRecommendRequest(BaseModel):
     user_id: str
