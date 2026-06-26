@@ -2,3 +2,7 @@
 venv/
 .venv/
 env/
+Categories_Full.xlsx
+Products.xlsx
+ProductVariants.xlsx
+Transactions.xlsx
