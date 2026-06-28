@@ -27,12 +27,12 @@ class RecommendationEngine:
         conn = pyodbc.connect(self.connection_string)
         
         query_fbt = """
-            SELECT CAST(t.CustomerId AS VARCHAR(50)) AS UserId, 
+            SELECT CAST(oi.OrderId AS VARCHAR(50)) AS UserId, 
                    CAST(pv.ProductId AS VARCHAR(50)) AS ProductId, 
                    1 AS Score
-            FROM Transactions t
-            JOIN ProductVariants pv ON t.VariantId = pv.VariantId
-            WHERE t.CustomerId IS NOT NULL AND pv.ProductId IS NOT NULL
+            FROM OrderItems oi
+            JOIN ProductVariants pv ON oi.VariantId = pv.VariantId
+            WHERE oi.OrderId IS NOT NULL AND pv.ProductId IS NOT NULL
         """
         df_fbt = pd.read_sql(query_fbt, conn)
         conn.close()
@@ -42,18 +42,8 @@ class RecommendationEngine:
         return df_grouped
 
     def fetch_cf_data(self):
-        """Fetch data from Transactions + UserInteractions for CF (Gợi ý cá nhân)"""
+        """Fetch data from UserInteractions for CF (Gợi ý cá nhân)"""
         conn = pyodbc.connect(self.connection_string)
-        
-        query_transactions = """
-            SELECT CAST(t.CustomerId AS VARCHAR(50)) AS UserId, 
-                   CAST(pv.ProductId AS VARCHAR(50)) AS ProductId, 
-                   5 AS Score
-            FROM Transactions t
-            JOIN ProductVariants pv ON t.VariantId = pv.VariantId
-            WHERE t.CustomerId IS NOT NULL AND pv.ProductId IS NOT NULL
-        """
-        df_trans = pd.read_sql(query_transactions, conn)
         
         query_interactions = """
             SELECT CAST(UserId AS VARCHAR(50)) AS UserId, 
@@ -65,10 +55,11 @@ class RecommendationEngine:
         df_interactions = pd.read_sql(query_interactions, conn)
         conn.close()
         
-        df_all = pd.concat([df_trans, df_interactions])
+        # Đưa ID về chữ thường để tránh lỗi 1 user bị tách làm 2 (do C# lưu lúc hoa lúc thường)
+        df_interactions['UserId'] = df_interactions['UserId'].str.lower()
         
         # Lấy max score nếu có duplicate
-        df_grouped = df_all.groupby(['UserId', 'ProductId'])['Score'].max().reset_index()
+        df_grouped = df_interactions.groupby(['UserId', 'ProductId'])['Score'].max().reset_index()
         return df_grouped
 
     def train_model(self):
@@ -98,23 +89,23 @@ class RecommendationEngine:
             except Exception as e:
                 print(f"Error training model: {e}")
 
-    def recommend_for_user(self, user_id_str, top_k=10):
+    def recommend_for_user(self, user_id_str, top_k=12):
         """Recommend items for a specific user using CF Matrix"""
         with self.lock:
             if self.cf_user_similarity is None or self.cf_user_item_matrix is None:
                 return []
             
             try:
-                user_idx = self.cf_users_map.index(str(user_id_str))
+                user_idx = self.cf_users_map.index(str(user_id_str).lower())
             except ValueError:
-                return self.get_popular_items(top_k, use_cf=True)
+                return self.get_popular_items(top_k, use_cf=True, user_id_str=user_id_str)
 
             sim_scores = self.cf_user_similarity[user_idx]
             item_scores = np.zeros(len(self.cf_items_map))
             sim_sum = np.sum(np.abs(sim_scores)) - 1
             
-            if sim_sum == 0:
-                return self.get_popular_items(top_k, use_cf=True)
+            if sim_sum <= 1e-9:
+                return []
                 
             for i in range(len(self.cf_users_map)):
                 if i != user_idx:
@@ -122,7 +113,7 @@ class RecommendationEngine:
                     
             item_scores = item_scores / sim_sum
 
-            user_interacted = self.cf_user_item_matrix[user_idx] > 0
+            user_interacted = self.cf_user_item_matrix[user_idx] == 5
             item_scores[user_interacted] = 0
 
             top_indices = np.argsort(item_scores)[::-1][:top_k]
@@ -133,7 +124,7 @@ class RecommendationEngine:
                     recommendations.append(self.cf_items_map[idx])
             
             if not recommendations:
-                return self.get_popular_items(top_k, use_cf=True)
+                return []
 
             return recommendations
 
@@ -141,18 +132,18 @@ class RecommendationEngine:
         """Recommend Frequently Bought Together items using FBT Matrix"""
         with self.lock:
             if self.fbt_user_item_matrix is None:
-                return self.get_popular_items(top_k, use_cf=False)
+                return []
                 
             try:
                 item_idx = self.fbt_items_map.index(str(product_id))
             except ValueError:
-                return self.get_popular_items(top_k, use_cf=False)
+                return []
 
             item_col = self.fbt_user_item_matrix[:, item_idx]
             user_indices = np.where(item_col > 0)[0]
             
             if len(user_indices) == 0:
-                return self.get_popular_items(top_k, use_cf=False)
+                return []
                 
             co_scores = np.sum(self.fbt_user_item_matrix[user_indices, :], axis=0)
             co_scores[item_idx] = 0
@@ -165,12 +156,39 @@ class RecommendationEngine:
                     recommendations.append(self.fbt_items_map[idx])
                     
             if not recommendations:
-                return self.get_popular_items(top_k, use_cf=False)
+                return []
                 
             return recommendations
 
-    def get_popular_items(self, top_k=10, use_cf=True):
-        """Fallback: Return most interacted items"""
+    def get_popular_items(self, top_k=10, use_cf=True, exclude_user_idx=None, user_id_str=None):
+        """Fallback: Return most sold and favorited items from DB"""
+        try:
+            conn = pyodbc.connect(self.connection_string)
+            
+            exclude_query = ""
+            params = []
+            if user_id_str:
+                exclude_query = "AND p.ProductId NOT IN (SELECT ProductId FROM UserInteractions WHERE UserId = ? AND InteractionType = 'PURCHASE')"
+                params.append(str(user_id_str))
+                
+            query = f"""
+                SELECT TOP {top_k} p.ProductId 
+                FROM Products p
+                LEFT JOIN Favorites f ON p.ProductId = f.ProductId
+                WHERE p.IsActived = 1 {exclude_query}
+                GROUP BY p.ProductId, p.SoldQuantity
+                ORDER BY p.SoldQuantity DESC, COUNT(f.Id) DESC
+            """
+            
+            df = pd.read_sql(query, conn, params=params)
+            conn.close()
+            
+            if not df.empty:
+                return df['ProductId'].astype(str).tolist()
+        except Exception as e:
+            print(f"Error fetching popular items from DB: {e}")
+
+        # Fallback if DB query fails
         matrix = self.cf_user_item_matrix if use_cf else self.fbt_user_item_matrix
         items_map = self.cf_items_map if use_cf else self.fbt_items_map
         
@@ -178,5 +196,10 @@ class RecommendationEngine:
             return []
         
         item_scores = np.sum(matrix, axis=0)
+        
+        if exclude_user_idx is not None and use_cf:
+            user_interacted = matrix[exclude_user_idx] == 5
+            item_scores[user_interacted] = 0
+
         top_indices = np.argsort(item_scores)[::-1][:top_k]
         return [items_map[i] for i in top_indices if item_scores[i] > 0]

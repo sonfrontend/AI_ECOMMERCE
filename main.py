@@ -28,7 +28,7 @@ feature_matrix = None
 
 class RecommendRequest(BaseModel):
     article_ids: List[str]
-    top_k: int = 15
+    top_k: int = 12
 
 @app.on_event("startup")
 async def startup_event():
@@ -163,7 +163,7 @@ async def startup_recommender():
 
 class CFRecommendRequest(BaseModel):
     user_id: str
-    top_k: int = 10
+    top_k: int = 12
 
 @app.post("/api/recommend-cf", response_model=List[str])
 async def recommend_cf(req: CFRecommendRequest):
